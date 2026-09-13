@@ -1,281 +1,256 @@
-import argparse
-from dataclasses import dataclass
 from pathlib import Path
+import argparse
 
 try:
     import cv2
     import numpy as np
 except ImportError as exc:
-    raise SystemExit(
-        "OpenCV nao esta instalado. Instale com: pip install opencv-python"
-    ) from exc
+    raise SystemExit("Instale o OpenCV com: pip install opencv-python") from exc
 
 
-@dataclass
-class ConfiguracaoDeteccao:
-    area_minima_bola: int = 20
-    area_minima_marcador: int = 20
-    distancia_maxima_marcadores: float = 90.0
+BASE = Path(__file__).parent
+CORES = {
+    "laranja": ((5, 80, 80), (25, 255, 255)),
+    "azul": ((90, 70, 50), (130, 255, 255)),
+    "verde": ((35, 60, 50), (85, 255, 255)),
+    "amarelo": ((22, 70, 70), (38, 255, 255)),
+    "vermelho": [((0, 70, 70), (4, 255, 255)), ((170, 70, 70), (179, 255, 255))],
+    "roxo": ((130, 40, 50), (165, 255, 255)),
+}
+CORES_JOGADORES = ["azul", "verde", "amarelo", "vermelho", "roxo"]
+COR_MEU_TIME = (255, 0, 0)
+COR_ADVERSARIO = (0, 0, 255)
 
 
-def criar_mascara(hsv: np.ndarray, limite_inferior: tuple, limite_superior: tuple) -> np.ndarray:
-    mascara = cv2.inRange(
-        hsv,
-        np.array(limite_inferior, dtype=np.uint8),
-        np.array(limite_superior, dtype=np.uint8),
-    )
+def mascara(hsv, cor):
+    limites = CORES[cor]
+    if isinstance(limites, list):
+        img = np.zeros(hsv.shape[:2], np.uint8)
+        for inferior, superior in limites:
+            img = cv2.bitwise_or(img, cv2.inRange(hsv, np.array(inferior), np.array(superior)))
+    else:
+        img = cv2.inRange(hsv, np.array(limites[0]), np.array(limites[1]))
+
     kernel = np.ones((5, 5), np.uint8)
-    mascara = cv2.morphologyEx(mascara, cv2.MORPH_OPEN, kernel)
-    mascara = cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel)
-    return mascara
+    img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+    return cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 
 
-def encontrar_centroides(mascara: np.ndarray, area_minima: int) -> list[tuple[int, int, float]]:
-    contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    centroides = []
+def centroides(img, area_min=20):
+    contornos, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    pontos = []
 
+    contornos = sorted(contornos, key=cv2.contourArea, reverse=True)
     for contorno in contornos:
         area = cv2.contourArea(contorno)
-
-        if area < area_minima:
+        if area < area_min:
             continue
 
-        momentos = cv2.moments(contorno)
+        m = cv2.moments(contorno)
+        if m["m00"]:
+            pontos.append((int(m["m10"] / m["m00"]), int(m["m01"] / m["m00"])))
 
-        if momentos["m00"] == 0:
+    return pontos
+
+
+def marcadores(hsv):
+    encontrados = []
+    for cor in CORES_JOGADORES:
+        for ponto in centroides(mascara(hsv, cor)):
+            encontrados.append({"cor": cor, "ponto": ponto})
+    return encontrados
+
+
+def distancia(p1, p2):
+    return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
+
+
+def pares_jogadores(hsv, distancia_max=55):
+    candidatos = []
+    pontos = marcadores(hsv)
+
+    for i, marcador_a in enumerate(pontos):
+        for j in range(i + 1, len(pontos)):
+            marcador_b = pontos[j]
+            if marcador_a["cor"] == marcador_b["cor"]:
+                continue
+
+            dist = distancia(marcador_a["ponto"], marcador_b["ponto"])
+            if dist <= distancia_max:
+                candidatos.append((dist, i, j))
+
+    candidatos.sort()
+    usados = set()
+    pares = []
+
+    for _, i, j in candidatos:
+        if i in usados or j in usados:
             continue
 
-        x = int(momentos["m10"] / momentos["m00"])
-        y = int(momentos["m01"] / momentos["m00"])
-        centroides.append((x, y, area))
+        usados.update((i, j))
+        pares.append((pontos[i], pontos[j]))
 
-    return centroides
+    return pares
 
 
-def detectar_bola(hsv: np.ndarray, config: ConfiguracaoDeteccao) -> tuple[int, int] | None:
-    mascara_laranja = criar_mascara(hsv, (5, 80, 80), (25, 255, 255))
-    centroides = encontrar_centroides(mascara_laranja, config.area_minima_bola)
+def maior_centro(hsv, cor):
+    pontos = centroides(mascara(hsv, cor))
+    return pontos[0] if pontos else None
 
-    if not centroides:
+
+def centro_proximo(hsv, cor, anterior, deslocamento_max=60):
+    pontos = centroides(mascara(hsv, cor))
+    if not pontos:
         return None
 
-    x, y, _ = max(centroides, key=lambda centroide: centroide[2])
-    return x, y
+    if anterior is None:
+        return pontos[0]
+
+    def distancia(ponto):
+        return ((ponto[0] - anterior[0]) ** 2 + (ponto[1] - anterior[1]) ** 2) ** 0.5
+
+    ponto = min(pontos, key=distancia)
+    return ponto if distancia(ponto) <= deslocamento_max else None
 
 
-def detectar_meu_jogador(
-    hsv: np.ndarray,
-    config: ConfiguracaoDeteccao,
-) -> tuple[int, int] | None:
-    mascara_azul = criar_mascara(hsv, (90, 70, 50), (130, 255, 255))
-    mascara_verde = criar_mascara(hsv, (35, 60, 50), (85, 255, 255))
+def meu_jogador(hsv, distancia_max=90):
+    azuis = centroides(mascara(hsv, "azul"))
+    verdes = centroides(mascara(hsv, "verde"))
+    pares = [
+        (azul, verde, ((azul[0] - verde[0]) ** 2 + (azul[1] - verde[1]) ** 2) ** 0.5)
+        for azul in azuis
+        for verde in verdes
+    ]
+    pares = [par for par in pares if par[2] <= distancia_max]
 
-    centroides_azuis = encontrar_centroides(mascara_azul, config.area_minima_marcador)
-    centroides_verdes = encontrar_centroides(mascara_verde, config.area_minima_marcador)
-
-    melhor_par = None
-    menor_distancia = float("inf")
-
-    for azul in centroides_azuis:
-        for verde in centroides_verdes:
-            distancia = ((azul[0] - verde[0]) ** 2 + (azul[1] - verde[1]) ** 2) ** 0.5
-
-            if distancia < menor_distancia and distancia <= config.distancia_maxima_marcadores:
-                melhor_par = (azul, verde)
-                menor_distancia = distancia
-
-    if melhor_par is None:
+    if not pares:
         return None
 
-    azul, verde = melhor_par
-    x = int((azul[0] + verde[0]) / 2)
-    y = int((azul[1] + verde[1]) / 2)
-    return x, y
+    azul, verde, _ = min(pares, key=lambda par: par[2])
+    return int((azul[0] + verde[0]) / 2), int((azul[1] + verde[1]) / 2)
 
 
-def desenhar_trajetoria(
-    frame_saida: np.ndarray,
-    pontos: list[tuple[int, int]],
-    cor: tuple[int, int, int],
-    raio_atual: int,
-) -> None:
-    if len(pontos) > 1:
-        for ponto_anterior, ponto_atual in zip(pontos, pontos[1:]):
-            cv2.line(frame_saida, ponto_anterior, ponto_atual, cor, 2)
+def mascara_campo(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    linhas = cv2.inRange(hsv, np.array((0, 0, 150)), np.array((179, 70, 255)))
+    kernel = np.ones((3, 3), np.uint8)
+    linhas = cv2.morphologyEx(linhas, cv2.MORPH_OPEN, kernel)
+    limpa = np.zeros_like(linhas)
+    total, rotulos, estatisticas, _ = cv2.connectedComponentsWithStats(linhas)
+
+    for i in range(1, total):
+        if estatisticas[i, cv2.CC_STAT_AREA] >= 100:
+            limpa[rotulos == i] = 255
+
+    return cv2.erode(limpa, kernel, iterations=1)
+
+
+def desenhar_campo(tela, frame_original):
+    linhas = mascara_campo(frame_original)
+    tela[linhas > 0] = (0, 0, 0)
+
+
+def quadrado_do_jogador(par, margem=12):
+    (x1, y1), (x2, y2) = par[0]["ponto"], par[1]["ponto"]
+    esquerda = min(x1, x2) - margem
+    direita = max(x1, x2) + margem
+    topo = min(y1, y2) - margem
+    baixo = max(y1, y2) + margem
+
+    lado = max(direita - esquerda, baixo - topo)
+    cx = (esquerda + direita) // 2
+    cy = (topo + baixo) // 2
+    metade = lado // 2
+    return (cx - metade, cy - metade), (cx + metade, cy + metade)
+
+
+def circulo_do_jogador(par):
+    p1, p2 = quadrado_do_jogador(par)
+    centro = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
+    raio = max(p2[0] - p1[0], p2[1] - p1[1]) // 2
+    return centro, raio
+
+
+def desenhar_jogadores(tela, pares):
+    for par in pares:
+        cores = {par[0]["cor"], par[1]["cor"]}
+        cor = COR_MEU_TIME if "azul" in cores else COR_ADVERSARIO
+        centro, raio = circulo_do_jogador(par)
+        cv2.circle(tela, centro, raio, cor, 1)
+
+
+def desenhar(frame, pontos, cor, raio, texto=None):
+    for p1, p2 in zip(pontos, pontos[1:]):
+        cv2.line(frame, p1, p2, cor, 3)
 
     if pontos:
-        cv2.circle(frame_saida, pontos[-1], raio_atual, cor, -1)
+        cv2.circle(frame, pontos[-1], raio, cor, -1)
+        if texto:
+            x, y = pontos[-1]
+            cv2.putText(frame, texto, (x + 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.55, cor, 2)
 
 
-def criar_frame_saida(
-    largura: int,
-    altura: int,
-    trajetoria_jogador: list[tuple[int, int]],
-    trajetoria_bola: list[tuple[int, int]],
-    frame_atual: int,
-) -> np.ndarray:
-    frame_saida = np.full((altura, largura, 3), 245, dtype=np.uint8)
-
-    cv2.rectangle(frame_saida, (0, 0), (largura - 1, altura - 1), (40, 40, 40), 2)
-    cv2.putText(
-        frame_saida,
-        f"Frame {frame_atual}",
-        (20, 35),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (40, 40, 40),
-        2,
-        cv2.LINE_AA,
-    )
-
-    desenhar_trajetoria(frame_saida, trajetoria_jogador, (255, 0, 0), 8)
-    desenhar_trajetoria(frame_saida, trajetoria_bola, (0, 140, 255), 6)
-
-    cv2.putText(
-        frame_saida,
-        "Jogador",
-        (20, altura - 55),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (255, 0, 0),
-        2,
-        cv2.LINE_AA,
-    )
-    cv2.putText(
-        frame_saida,
-        "Bola",
-        (20, altura - 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (0, 140, 255),
-        2,
-        cv2.LINE_AA,
-    )
-
-    return frame_saida
-
-
-def processar_video(
-    caminho_entrada: Path,
-    caminho_saida: Path,
-    config: ConfiguracaoDeteccao,
-) -> None:
-    video = cv2.VideoCapture(str(caminho_entrada))
-
+def processar(video_path):
+    video = cv2.VideoCapture(str(video_path))
     if not video.isOpened():
-        raise SystemExit(f"Nao foi possivel abrir o video: {caminho_entrada}")
+        print(f"Nao foi possivel abrir: {video_path}")
+        return
 
-    fps = video.get(cv2.CAP_PROP_FPS)
-    largura = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
-    altura = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps_saida = fps if fps > 0 else 30
+    fps = video.get(cv2.CAP_PROP_FPS) or 30
+    w = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    saida_path = video_path.with_name(f"{video_path.stem}_trajetoria.mp4")
+    saida = cv2.VideoWriter(str(saida_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    saida = cv2.VideoWriter(str(caminho_saida), fourcc, fps_saida, (largura, altura))
-
-    if not saida.isOpened():
-        video.release()
-        raise SystemExit(f"Nao foi possivel criar o video de saida: {caminho_saida}")
-
-    trajetoria_jogador = []
-    trajetoria_bola = []
-    numero_frame = 0
+    traj_jogador, traj_bola, frame_n = [], [], 0
 
     while True:
-        sucesso, frame = video.read()
-
-        if not sucesso:
+        ok, frame = video.read()
+        if not ok:
             break
 
-        numero_frame += 1
+        frame_n += 1
+        # No teste1, depois do frame 114 o video volta ao inicio; por isso esses frames sao ignorados.
+        if video_path.name == "teste1.mp4" and frame_n > 114:
+            break
+
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        jogador = meu_jogador(hsv)
+        bola = centro_proximo(hsv, "laranja", traj_bola[-1] if traj_bola else None)
+        jogadores = pares_jogadores(hsv)
 
-        posicao_jogador = detectar_meu_jogador(hsv, config)
-        posicao_bola = detectar_bola(hsv, config)
+        if jogador:
+            traj_jogador.append(jogador)
+        if bola:
+            traj_bola.append(bola)
 
-        if posicao_jogador is not None:
-            trajetoria_jogador.append(posicao_jogador)
-
-        if posicao_bola is not None:
-            trajetoria_bola.append(posicao_bola)
-
-        frame_saida = criar_frame_saida(
-            largura,
-            altura,
-            trajetoria_jogador,
-            trajetoria_bola,
-            numero_frame,
-        )
-        saida.write(frame_saida)
+        tela = np.full((h, w, 3), 245, np.uint8)
+        desenhar_campo(tela, frame)
+        desenhar_jogadores(tela, jogadores)
+        cv2.putText(tela, f"Frame {frame_n}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (40, 40, 40), 2)
+        desenhar(tela, traj_bola, (0, 140, 255), 6, "bola")
+        desenhar(tela, traj_jogador, (255, 0, 0), 8, "jogador")
+        saida.write(tela)
 
     video.release()
     saida.release()
-
-    print(f"Video gerado: {caminho_saida}")
-    print(f"Pontos do jogador detectados: {len(trajetoria_jogador)}")
-    print(f"Pontos da bola detectados: {len(trajetoria_bola)}")
+    print(f"Gerado: {saida_path}")
 
 
-def encontrar_videos(padrao: str, pasta_base: Path) -> list[Path]:
-    caminho = Path(padrao)
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("entrada", nargs="?", default="teste[0-9].mp4")
+    args = parser.parse_args()
 
-    if caminho.is_file():
-        return [caminho]
-
-    if not caminho.is_absolute():
-        caminho = pasta_base / caminho
-
-    videos = sorted(caminho.parent.glob(caminho.name))
+    caminho = Path(args.entrada)
+    videos = [caminho] if caminho.is_file() else sorted(BASE.glob(args.entrada))
+    videos = [video for video in videos if "_trajetoria" not in video.stem]
 
     if not videos:
-        raise SystemExit(f"Nenhum video encontrado com o padrao: {caminho}")
-
-    return videos
-
-
-def criar_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Gera um video 2D com a trajetoria do meu jogador e da bola."
-    )
-    parser.add_argument(
-        "entrada",
-        nargs="?",
-        default="teste*.mp4",
-        help="Arquivo ou padrao dos videos de entrada. Padrao: teste*.mp4",
-    )
-    parser.add_argument(
-        "--saida",
-        default=None,
-        help="Arquivo de saida. Use somente quando a entrada for um unico video.",
-    )
-    parser.add_argument(
-        "--distancia-marcadores",
-        type=float,
-        default=90.0,
-        help="Distancia maxima entre os circulos azul e verde do seu jogador.",
-    )
-    return parser
-
-
-def main() -> None:
-    pasta_base = Path(__file__).parent
-    args = criar_parser().parse_args()
-    videos = encontrar_videos(args.entrada, pasta_base)
-
-    if args.saida is not None and len(videos) > 1:
-        raise SystemExit("Use --saida somente quando a entrada for um unico video.")
-
-    config = ConfiguracaoDeteccao(
-        distancia_maxima_marcadores=args.distancia_marcadores,
-    )
+        raise SystemExit(f"Nenhum video encontrado: {args.entrada}")
 
     for video in videos:
-        caminho_saida = Path(args.saida) if args.saida else video.with_name(f"{video.stem}_trajetoria.mp4")
-
-        if not caminho_saida.is_absolute():
-            caminho_saida = pasta_base / caminho_saida
-
-        processar_video(video, caminho_saida, config)
+        processar(video if video.is_absolute() else BASE / video)
 
 
 if __name__ == "__main__":
