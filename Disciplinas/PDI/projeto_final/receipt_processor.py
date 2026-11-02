@@ -1,5 +1,6 @@
 """OCR, uniao de trechos sobrepostos e extracao basica de uma nota fiscal."""
 
+from collections import Counter
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 import csv
@@ -28,6 +29,7 @@ class Receipt:
     total: float | None
     items: list[ReceiptItem]
     raw_text: str
+    declared_item_count: int | None = None
 
 
 def _clean(line: str) -> str:
@@ -150,6 +152,43 @@ def _description(line: str) -> str:
     return " ".join(without_numbers.strip(" -.:;").split())
 
 
+def extract_declared_item_count(lines: list[str]) -> int | None:
+    counts = []
+    for line in lines:
+        match = re.search(r"(?:QTDE|QTD|QUANTIDADE)\.?\s*TOTAL\s*(?:DE\s*)?ITEN[SGS]?(.*)", line, re.IGNORECASE)
+        if match:
+            numbers = re.findall(r"\b\d+\b", match.group(1))
+            if numbers and int(numbers[-1]) > 0:
+                counts.append(int(numbers[-1]))
+    return Counter(counts).most_common(1)[0][0] if counts else None
+
+
+def write_count_validation(receipt: Receipt, directory: Path) -> None:
+    expected = receipt.declared_item_count
+    actual = len(receipt.items)
+    report = [f"Itens declarados na nota: {expected if expected is not None else 'nao identificado'}",
+              f"Registros extraidos: {actual}"]
+    if expected is not None:
+        report.append(f"Diferenca (extraidos - declarados): {actual - expected}")
+        report.append("Contagem confere; isso nao garante a exatidao do OCR." if actual == expected else
+                      "DIVERGENCIA: revisar duplicacoes, leituras invalidas e itens ausentes.")
+    else:
+        report.append("Nao foi possivel validar a contagem declarada.")
+    report.append("Pares suspeitos sao indicios; produtos repetidos podem ser legitimos. Nenhum corte automatico pelo total foi aplicado.")
+    with (directory / "possiveis_duplicados.csv").open("w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.writer(file, delimiter=";")
+        writer.writerow(["registro_a", "registro_b", "descricao_a", "descricao_b", "similaridade", "mesmo_total"])
+        for i, left in enumerate(receipt.items):
+            for j in range(i + 1, actual):
+                right = receipt.items[j]
+                similarity = _description_similarity(left.description, right.description)
+                same_total = left.total_price is not None and left.total_price == right.total_price
+                if similarity >= 0.74 or (same_total and similarity >= 0.5):
+                    writer.writerow([i + 1, j + 1, left.description, right.description, f"{similarity:.2f}", same_total])
+    (directory / "validacao_itens.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+    print("[validacao] " + " | ".join(report[:4]), flush=True)
+
+
 def parse_receipt(lines: list[str]) -> Receipt:
     raw_text = "\n".join(lines)
     purchase_date = next((match.group(1) for line in lines if (match := DATE.search(line))), None)
@@ -199,6 +238,7 @@ def parse_receipt(lines: list[str]) -> Receipt:
         total=total,
         items=_deduplicate_items(items),
         raw_text=raw_text,
+        declared_item_count=extract_declared_item_count(lines),
     )
 
 
@@ -217,8 +257,8 @@ def process_session(session: Path, language: str = "por") -> Receipt:
     frames = sorted(session.glob("frame_*.png"))
     if not frames:
         raise FileNotFoundError(f"Nenhum frame encontrado em {session}")
-    frames = _representative_frames(frames)
     lines = merge_ocr_texts([read_text(frame, language) for frame in frames])
+    (session / "texto_ocr.txt").write_text("\n".join(lines), encoding="utf-8")
     return parse_receipt(lines)
 
 
@@ -228,6 +268,7 @@ def receipt_as_dict(receipt: Receipt) -> dict:
 
 def write_analysis_table(receipt: Receipt, output_directory: Path) -> tuple[Path, Path]:
     """Gera formatos para conferencia humana no Excel ou em um editor Markdown."""
+    write_count_validation(receipt, output_directory)
     csv_path = output_directory / "analise_itens.csv"
     markdown_path = output_directory / "analise_itens.md"
     headers = ["item", "quantidade", "unidade", "preco_unitario", "valor_total", "categoria", "confianca", "linha_ocr"]

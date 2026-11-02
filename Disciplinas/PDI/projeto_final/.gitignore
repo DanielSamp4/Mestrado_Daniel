@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 captures/
 purchases.sqlite3
+nfce_sample.html

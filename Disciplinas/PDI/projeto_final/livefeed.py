@@ -97,7 +97,7 @@ def livefeed(camera_index: int | str = 0, mirror: bool = True) -> Path | None:
 
     session = _new_session()
     saved_frames: list[Path] = []
-    window_name = "Escaneamento de nota - s: salvar | f: finalizar | q: cancelar"
+    window_name = "Escaneamento de nota - s: salvar | f: finalizar | q: sair"
     preview_window_name = "Ultimo trecho capturado (automatico)"
     timing_totals: dict[str, float] = defaultdict(float)
     frames_profiled = 0
@@ -159,6 +159,8 @@ def livefeed(camera_index: int | str = 0, mirror: bool = True) -> Path | None:
             if key == ord("f"):
                 finished = True
                 break
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
+                break
             if key == ord("q"):
                 break
             frame_timings["frame_total"] = (perf_counter() - frame_started_at) * 1000
@@ -173,7 +175,7 @@ def livefeed(camera_index: int | str = 0, mirror: bool = True) -> Path | None:
         camera.release()
         cv2.destroyAllWindows()
 
-    if finished and saved_frames:
+    if saved_frames:
         _write_manifest(session, saved_frames)
         print(f"[sessao] Finalizada com {len(saved_frames)} trechos: {session}", flush=True)
         return session

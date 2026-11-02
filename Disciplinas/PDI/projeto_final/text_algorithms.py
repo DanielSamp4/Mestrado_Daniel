@@ -16,6 +16,7 @@ class TextDistanceResult:
     status: str
     message: str
     character_height: float = 0.0
+    text_bounds: tuple[int, int, int, int] | None = None
 
 
 # Faixa em pixels adequada para caracteres legíveis em uma webcam comum.
@@ -166,6 +167,7 @@ def estimate_text_distance(
             "too_close",
             "Afaste a camera: imagem desfocada.",
             character_height,
+            (left, top, right, bottom),
         )
     if character_height < MIN_READABLE_HEIGHT:
         return TextDistanceResult(
@@ -173,6 +175,7 @@ def estimate_text_distance(
             "too_far",
             "Aproxime o texto.",
             character_height,
+            (left, top, right, bottom),
         )
     if character_height > MAX_READABLE_HEIGHT:
         return TextDistanceResult(
@@ -180,8 +183,10 @@ def estimate_text_distance(
             "too_close",
             "Afaste o texto.",
             character_height,
+            (left, top, right, bottom),
         )
-    return TextDistanceResult(True, "ok", "Distancia boa: texto legivel.", character_height)
+    return TextDistanceResult(True, "ok", "Distancia boa: texto legivel.", character_height,
+                              (left, top, right, bottom))
 
 
 def draw_text_distance_feedback(frame: np.ndarray, result: TextDistanceResult) -> np.ndarray:
@@ -193,6 +198,9 @@ def draw_text_distance_feedback(frame: np.ndarray, result: TextDistanceResult) -
         "none": (180, 180, 180),
     }
     color = colors[result.status]
+    if result.text_detected and result.text_bounds is not None:
+        left, top, right, bottom = result.text_bounds
+        cv2.rectangle(frame, (left, top), (right - 1, bottom - 1), color, 2)
     cv2.rectangle(frame, (10, 10), (frame.shape[1] - 10, 58), (0, 0, 0), -1)
     cv2.putText(
         frame,
