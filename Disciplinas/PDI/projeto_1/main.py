@@ -14,24 +14,19 @@ CORES = {
     "azul": ((90, 70, 50), (130, 255, 255)),
     "verde": ((35, 60, 50), (85, 255, 255)),
     "amarelo": ((22, 70, 70), (38, 255, 255)),
-    "vermelho": [((0, 70, 70), (4, 255, 255)), ((170, 70, 70), (179, 255, 255))],
+    "vermelho": ((0, 70, 70), (4, 255, 255)), #((170, 70, 70), (179, 255, 255)),
     "roxo": ((130, 40, 50), (165, 255, 255)),
 }
 CORES_JOGADORES = ["azul", "verde", "amarelo", "vermelho", "roxo"]
-COR_MEU_TIME = (255, 0, 0)
-COR_ADVERSARIO = (0, 0, 255)
+COR_MEU_TIME = (255, 0, 0)  # BGR
+COR_ADVERSARIO = (0, 0, 255) # BGR
 
 
 def mascara(hsv, cor):
     limites = CORES[cor]
-    if isinstance(limites, list):
-        img = np.zeros(hsv.shape[:2], np.uint8)
-        for inferior, superior in limites:
-            img = cv2.bitwise_or(img, cv2.inRange(hsv, np.array(inferior), np.array(superior)))
-    else:
-        img = cv2.inRange(hsv, np.array(limites[0]), np.array(limites[1]))
+    img = cv2.inRange(hsv, np.array(limites[0]), np.array(limites[1]))
 
-    kernel = np.ones((5, 5), np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
     img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
     return cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
 
@@ -196,7 +191,7 @@ def processar(video_path):
         print(f"Nao foi possivel abrir: {video_path}")
         return
 
-    fps = video.get(cv2.CAP_PROP_FPS) or 30
+    fps = video.get(cv2.CAP_PROP_FPS) 
     w = int(video.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT))
     saida_path = video_path.with_name(f"{video_path.stem}_trajetoria.mp4")
@@ -211,7 +206,7 @@ def processar(video_path):
 
         frame_n += 1
         # No teste1, depois do frame 114 o video volta ao inicio; por isso esses frames sao ignorados.
-        if video_path.name == "teste1.mp4" and frame_n > 114:
+        if video_path.name == "teste1.mp4" and frame_n > 114:   
             break
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
