@@ -1,5 +1,6 @@
 from pathlib import Path
 import argparse
+import math
 
 try:
     import cv2
@@ -18,8 +19,8 @@ CORES = {
     "roxo": ((130, 40, 50), (165, 255, 255)),
 }
 CORES_JOGADORES = ["azul", "verde", "amarelo", "vermelho", "roxo"]
-COR_MEU_TIME = (255, 0, 0)  # BGR
-COR_ADVERSARIO = (0, 0, 255) # BGR
+COR_MEU_TIME = (255, 0, 0)  # BGR azul
+COR_ADVERSARIO = (0, 0, 255) # BGR amarelo
 
 
 def mascara(hsv, cor):
@@ -41,7 +42,7 @@ def centroides(img, area_min=20):
         if area < area_min:
             continue
 
-        m = cv2.moments(contorno)
+        m = cv2.moments(contorno) # m00 é a area, m10 soma dos pontos em x, m01 soma dos pontos em y
         if m["m00"]:
             pontos.append((int(m["m10"] / m["m00"]), int(m["m01"] / m["m00"])))
 
@@ -56,11 +57,11 @@ def marcadores(hsv):
     return encontrados
 
 
-def distancia(p1, p2):
+def distancia(p1, p2): # distancia euclidiana
     return ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5
 
 
-def pares_jogadores(hsv, distancia_max=55):
+def pares_jogadores(hsv, distancia_max=25):
     candidatos = []
     pontos = marcadores(hsv)
 
@@ -93,7 +94,7 @@ def maior_centro(hsv, cor):
     return pontos[0] if pontos else None
 
 
-def centro_proximo(hsv, cor, anterior, deslocamento_max=60):
+def centro_proximo(hsv, cor, anterior, deslocamento_max=20):
     pontos = centroides(mascara(hsv, cor))
     if not pontos:
         return None
@@ -101,14 +102,14 @@ def centro_proximo(hsv, cor, anterior, deslocamento_max=60):
     if anterior is None:
         return pontos[0]
 
-    def distancia(ponto):
+    def distancia(ponto): # distancia euclidiana
         return ((ponto[0] - anterior[0]) ** 2 + (ponto[1] - anterior[1]) ** 2) ** 0.5
 
     ponto = min(pontos, key=distancia)
     return ponto if distancia(ponto) <= deslocamento_max else None
 
 
-def meu_jogador(hsv, distancia_max=90):
+def meu_jogador(hsv, distancia_max=25):
     azuis = centroides(mascara(hsv, "azul"))
     verdes = centroides(mascara(hsv, "verde"))
     pares = [
@@ -145,33 +146,37 @@ def desenhar_campo(tela, frame_original):
     tela[linhas > 0] = (0, 0, 0)
 
 
-def quadrado_do_jogador(par, margem=12):
+def raio_medio_marcadores(hsv, area_min=20):
+    raios = []
+    for cor in CORES_JOGADORES:
+        contornos, _ = cv2.findContours(
+            mascara(hsv, cor), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        for contorno in contornos:
+            if cv2.contourArea(contorno) >= area_min:
+                _, raio = cv2.minEnclosingCircle(contorno)
+                raios.append(raio)
+    return sum(raios) / len(raios) if raios else None
+
+
+def quadrado_do_jogador(par, raio):
+    # Limites das tangentes aos dois circulos, sem margem adicional.
     (x1, y1), (x2, y2) = par[0]["ponto"], par[1]["ponto"]
-    esquerda = min(x1, x2) - margem
-    direita = max(x1, x2) + margem
-    topo = min(y1, y2) - margem
-    baixo = max(y1, y2) + margem
-
-    lado = max(direita - esquerda, baixo - topo)
-    cx = (esquerda + direita) // 2
-    cy = (topo + baixo) // 2
-    metade = lado // 2
-    return (cx - metade, cy - metade), (cx + metade, cy + metade)
+    esquerda = math.floor(min(x1, x2) - raio)
+    direita = math.ceil(max(x1, x2) + raio)
+    topo = math.floor(min(y1, y2) - raio)
+    baixo = math.ceil(max(y1, y2) + raio)
+    return (esquerda, topo), (direita, baixo)
 
 
-def circulo_do_jogador(par):
-    p1, p2 = quadrado_do_jogador(par)
-    centro = ((p1[0] + p2[0]) // 2, (p1[1] + p2[1]) // 2)
-    raio = max(p2[0] - p1[0], p2[1] - p1[1]) // 2
-    return centro, raio
-
-
-def desenhar_jogadores(tela, pares):
+def desenhar_jogadores(tela, pares, raio):
+    if raio is None:
+        return
     for par in pares:
         cores = {par[0]["cor"], par[1]["cor"]}
         cor = COR_MEU_TIME if "azul" in cores else COR_ADVERSARIO
-        centro, raio = circulo_do_jogador(par)
-        cv2.circle(tela, centro, raio, cor, 1)
+        p1, p2 = quadrado_do_jogador(par, raio)
+        cv2.rectangle(tela, p1, p2, cor, 1)
 
 
 def desenhar(frame, pontos, cor, raio, texto=None):
@@ -198,6 +203,7 @@ def processar(video_path):
     saida = cv2.VideoWriter(str(saida_path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
 
     traj_jogador, traj_bola, frame_n = [], [], 0
+    raio_marcadores = None
 
     while True:
         ok, frame = video.read()
@@ -210,6 +216,9 @@ def processar(video_path):
             break
 
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        if frame_n == 1:
+            raio_marcadores = raio_medio_marcadores(hsv)
+            
         jogador = meu_jogador(hsv)
         bola = centro_proximo(hsv, "laranja", traj_bola[-1] if traj_bola else None)
         jogadores = pares_jogadores(hsv)
@@ -221,7 +230,7 @@ def processar(video_path):
 
         tela = np.full((h, w, 3), 245, np.uint8)
         desenhar_campo(tela, frame)
-        desenhar_jogadores(tela, jogadores)
+        desenhar_jogadores(tela, jogadores, raio_marcadores)
         cv2.putText(tela, f"Frame {frame_n}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (40, 40, 40), 2)
         desenhar(tela, traj_bola, (0, 140, 255), 6, "bola")
         desenhar(tela, traj_jogador, (255, 0, 0), 8, "jogador")
